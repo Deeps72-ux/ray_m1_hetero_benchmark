@@ -1,0 +1,30 @@
+# =========================== 
+# Ray M1 Heterogeneous Benchmark 
+# =========================== 
+# Tested on macOS (Apple Silicon, M1/M2) # Python 3.9–3.12 
+# Install with: # pip install -r requirements.txt 
+# =========================== 
+
+# --- Core Parallel & Distributed Framework --- r
+ay[default]>=2.8.0 
+
+# --- Math & Scientific Computing --- 
+numpy>=1.24.0 
+pandas>=2.0.0 
+matplotlib>=3.7.0 
+
+# --- System Utilities --- 
+psutil>=5.9.0 
+
+# --- Deep Learning Framework (Apple Silicon) --- 
+# For MPS (Metal Performance Shaders) support on macOS 12.3+ 
+# Use PyTorch with the MPS backend (do NOT use CUDA wheels) 
+# You can install either the stable or nightly version below. 
+
+# Option 1: Stable release (recommended) 
+torch>=2.3.0 
+torchvision>=0.18.0 
+torchaudio>=2.3.0 
+
+# Option 2 (alternative): Nightly build with latest MPS improvements 
+# torch --pre torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/nightly/cpu
