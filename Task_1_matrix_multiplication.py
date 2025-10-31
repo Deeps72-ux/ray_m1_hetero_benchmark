@@ -1,4 +1,3 @@
-# ray_m1_hetero_benchmark_final_fixed.py
 import time
 import os
 import gc
@@ -137,7 +136,7 @@ if __name__ == "__main__":
         plt.bar(['CPU-only', 'MPS-only', 'Hetero'], [cpu_wall, mps_wall, hetero_wall])
         plt.ylabel('Wall Time (s)')
         plt.title('M1 Air 8 GB – Heterogeneous MatMul')
-        plt.savefig('m1_hetero_benchmark.png', dpi=150, bbox_inches='tight')
+        plt.savefig('results/Task1/m1_Matrix_multiplication_benchmark.png', dpi=150, bbox_inches='tight')
         plt.show()
     except: pass
 
