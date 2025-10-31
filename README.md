@@ -68,7 +68,7 @@ Each script automatically creates a corresponding folder inside results/TaskX/
 
 - Outputs wall time per mode + bar chart.
 
-### Task 2 — Monte Carlo π (Task_2_Monte_Carlo_Simulation.py)
+### Task 2 — Monte Carlo π 
 - Simulates random points to approximate π.
 
 - Compares NumPy (CPU), PyTorch (MPS), and mixed Ray scheduling.
