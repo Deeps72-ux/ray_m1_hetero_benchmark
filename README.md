@@ -37,13 +37,11 @@ pip install -r requirements.txt
 ## How to run
 Run the matrix multiplication benchmark (Task 1):
 ```bash
-python ray_m1_hetero_benchmark.py
+python Task_1_matrix_multiplication.py
 ```
 Run the Monte Carlo benchmark (Task 2):
 ```bash
 python Task_2_Monte_Carlo_Simulation.py
-# or use the fixed version if you ran into resource errors:
-python Task_2_Monte_Carlo_Simulation_fixed.py
 ```
 
 ## Environment tuning (recommended for fair comparisons)
