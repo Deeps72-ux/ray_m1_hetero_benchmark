@@ -80,7 +80,8 @@ def run_experiment(total_samples: int, batch: int):
 
     # -------------------------------------------------- CPU-only
     print("\n--- CPU-only ------------------------------------------------")
-    torch.mps.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
     st = time.time()
     cpu_futs = [cpu_pi.remote(batch, i + 1000) for i in range(n_batches)]
     cpu_counts = ray.get(cpu_futs)
@@ -89,7 +90,8 @@ def run_experiment(total_samples: int, batch: int):
 
     # -------------------------------------------------- MPS-only
     print("\n--- MPS-only ------------------------------------------------")
-    torch.mps.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
     st = time.time()
     mps_futs = [mps_pi.remote(batch, i + 2000) for i in range(n_batches)]
     mps_counts = ray.get(mps_futs)
@@ -98,7 +100,8 @@ def run_experiment(total_samples: int, batch: int):
 
     # -------------------------------------------------- Heterogeneous
     print("\n--- Heterogeneous (CPU + MPS) -------------------------------")
-    torch.mps.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
     st = time.time()
     hetero_futs = []
     for i in range(n_batches):
@@ -161,6 +164,7 @@ if __name__ == "__main__":
     stats = run_experiment(TOTAL_SAMPLES, BATCH)
 
     # optional plot
+    os.makedirs('results/Task2', exist_ok=True)
     try:
         plot_results(stats)
     except Exception as e:

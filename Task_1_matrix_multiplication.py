@@ -7,7 +7,9 @@ import numpy as np
 import ray
 import torch
 
-# ---------- CLEAN OLD RAY SESSIONS ----------
+# ----------------------------------------------------------------------
+# 1. Clean old Ray sessions (prevents /tmp/ray warnings)
+# ----------------------------------------------------------------------
 def cleanup_ray_tmp():
     tmp_dir = "/tmp/ray"
     if os.path.exists(tmp_dir):
@@ -21,15 +23,17 @@ def cleanup_ray_tmp():
                     print(f"Could not clean {item}: {e}")
 
 cleanup_ray_tmp()
-# -------------------------------------------
 
-# ---------- CONFIG ----------
-N                 = 2048
-NUM_CPU_TASKS     = 4
-NUM_MPS_TASKS     = 1
-OBJECT_STORE_MB   = 200
-# ---------------------------
+# ----------------------------------------------------------------------
+# 2. Configuration – safe for 8 GB M1 Air
+# ----------------------------------------------------------------------
+N               = 4096          # Matrix dimension (N×N, float32)
+NUM_BLOCKS      = 16            # Split A into this many row-blocks
+OBJECT_STORE_MB = 500           # Ray object store budget
 
+# ----------------------------------------------------------------------
+# 3. Helpers
+# ----------------------------------------------------------------------
 def human(x: float) -> str:
     return f"{x:.3f}"
 
@@ -41,108 +45,177 @@ def mps_available():
     return torch.backends.mps.is_available() and torch.backends.mps.is_built()
 
 # ----------------------------------------------------------------------
-if __name__ == "__main__":
-    print(f"PyTorch MPS: {mps_available()}")
+# 4. Ray remote tasks – each computes ONE row-block of C = A @ B
+#
+#    C[i] = A_rows[i] @ B       (embarrassingly parallel: no dependency
+#                                 between row-blocks)
+# ----------------------------------------------------------------------
+@ray.remote(num_cpus=1)
+def cpu_block_matmul(a_block, b):
+    """C_block = A_block @ B  using NumPy (Apple Accelerate BLAS)."""
+    t0 = time.time()
+    c_block = a_block.dot(b)
+    return c_block, time.time() - t0
 
+@ray.remote(resources={"MPS": 1.0})
+def mps_block_matmul(a_block, b):
+    """C_block = A_block @ B  using PyTorch MPS (Metal GPU)."""
+    device = torch.device("mps")
+    a_block = np.copy(a_block)          # Ray objects are read-only
+    b = np.copy(b)
+    a_t = torch.from_numpy(a_block).to(device)
+    b_t = torch.from_numpy(b).to(device)
+    torch.mps.synchronize()
+
+    t0 = time.time()
+    c_t = torch.matmul(a_t, b_t)
+    torch.mps.synchronize()             # wait for GPU kernel to finish
+    elapsed = time.time() - t0
+
+    c_block = c_t.cpu().numpy()
+    del a_t, b_t, c_t
+    torch.mps.empty_cache()
+    return c_block, elapsed
+
+# ----------------------------------------------------------------------
+# 5. Main experiment
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    print(f"PyTorch MPS available: {mps_available()}")
+
+    num_cores = psutil.cpu_count(logical=False) or 4
     ray.init(
-        num_cpus=psutil.cpu_count(logical=False),
+        num_cpus=num_cores,
         object_store_memory=OBJECT_STORE_MB * 1024**2,
         resources={"MPS": 1.0},
         ignore_reinit_error=True,
     )
 
+    # ── Generate matrices ──────────────────────────────────────────
     A = np.random.randn(N, N).astype(np.float32)
     B = np.random.randn(N, N).astype(np.float32)
-    print(f"N = {N} → {A.nbytes/1e6:.1f} MB per matrix")
+    block_rows = N // NUM_BLOCKS
 
-    a_ref = ray.put(A)
-    b_ref = ray.put(B)
+    print(f"Matrix size : {N}×{N} float32  ({A.nbytes / 1e6:.1f} MB each)")
+    print(f"Row-blocks  : {NUM_BLOCKS} × ({block_rows}×{N})")
+    print(f"CPU cores   : {num_cores}")
+    print(f"Total FLOPs : {2 * N**3 / 1e9:.1f} GFLOP")
 
-    @ray.remote
-    def cpu_matmul(a, b):
-        t0 = time.time()
-        c = a.dot(b)
-        return {"time": time.time() - t0, "sum": float(np.sum(c))}
+    # Split A into row-blocks → each can be multiplied with B independently
+    a_blocks = [A[i * block_rows:(i + 1) * block_rows] for i in range(NUM_BLOCKS)]
+    a_refs   = [ray.put(blk) for blk in a_blocks]
+    b_ref    = ray.put(B)
 
-    @ray.remote(resources={"MPS": 1.0})
-    def mps_matmul(a, b):
-        device = torch.device("mps")
-        a = np.copy(a)  # Force writable
-        b = np.copy(b)
-        a_t = torch.from_numpy(a).to(device)
-        b_t = torch.from_numpy(b).to(device)
+    # Reference result for correctness verification
+    C_ref = A.dot(B)
 
-        torch.mps.synchronize()
-        t0 = time.time()
-        c_t = torch.matmul(a_t, b_t)
-        c_cpu = c_t.to("cpu")
-        t1 = time.time()
-        return {"time": t1 - t0, "sum": float(torch.sum(c_cpu).item())}
-
-    # --- Warm-up ---
+    # ── Warm-up ────────────────────────────────────────────────────
     print("\n--- Warm-up ---")
-    _ = ray.get(cpu_matmul.remote(a_ref, b_ref))
+    _ = ray.get(cpu_block_matmul.remote(a_refs[0], b_ref))
+    if mps_available():
+        _ = ray.get(mps_block_matmul.remote(a_refs[0], b_ref))
+    print("Warm-up complete.\n")
+
+    # ── CPU-only ───────────────────────────────────────────────────
+    # All NUM_BLOCKS blocks dispatched to CPU workers.
+    # Ray schedules up to `num_cores` in parallel.
+    print(f"--- CPU-only ({NUM_BLOCKS} blocks across {num_cores} CPU cores) ---")
+    st = time.time()
+    futs = [cpu_block_matmul.remote(a_refs[i], b_ref) for i in range(NUM_BLOCKS)]
+    results = ray.get(futs)
+    cpu_wall = time.time() - st
+
+    C_cpu = np.vstack([r[0] for r in results])
+    cpu_times = [r[1] for r in results]
+    cpu_err = float(np.max(np.abs(C_cpu - C_ref)))
+    print(f"Wall : {human(cpu_wall)} s  |  Avg block: {human(np.mean(cpu_times))} s  |  Max err: {cpu_err:.2e}")
+
+    # ── MPS-only ───────────────────────────────────────────────────
+    # All blocks go through the single GPU.  Because MPS resource = 1.0,
+    # Ray queues them and they execute sequentially on the GPU.
+    if mps_available():
+        print(f"\n--- MPS-only ({NUM_BLOCKS} blocks, sequential on GPU) ---")
+        torch.mps.empty_cache()
+        st = time.time()
+        futs = [mps_block_matmul.remote(a_refs[i], b_ref) for i in range(NUM_BLOCKS)]
+        results = ray.get(futs)
+        mps_wall = time.time() - st
+
+        C_mps = np.vstack([r[0] for r in results])
+        mps_times = [r[1] for r in results]
+        mps_err = float(np.max(np.abs(C_mps - C_ref)))
+        print(f"Wall : {human(mps_wall)} s  |  Avg block: {human(np.mean(mps_times))} s  |  Max err: {mps_err:.2e}")
+    else:
+        print("\n--- MPS-only skipped (MPS not available) ---")
+        mps_wall = float('inf')
+
+    # ── Heterogeneous ──────────────────────────────────────────────
+    # Interleave blocks between CPU and MPS.  The GPU processes its
+    # blocks sequentially while CPU workers handle theirs in parallel.
+    # Wall time ≈ max(CPU share, GPU share) — overlap is the key win.
+    print(f"\n--- Heterogeneous (CPU + MPS concurrent) ---")
     if mps_available():
         torch.mps.empty_cache()
-        _ = ray.get(mps_matmul.remote(a_ref, b_ref))
-
-    # --- CPU-only ---
-    print(f"\n--- CPU-only ({NUM_CPU_TASKS} tasks) ---")
-    torch.mps.empty_cache()
     st = time.time()
-    cpu_futs = [cpu_matmul.remote(a_ref, b_ref) for _ in range(NUM_CPU_TASKS)]
-    cpu_res = ray.get(cpu_futs)
-    cpu_wall = time.time() - st
-    print(f"Wall: {human(cpu_wall)} s | Per-task: {human(sum(r['time'] for r in cpu_res)/len(cpu_res))}")
-
-    # --- MPS-only ---
-    print(f"\n--- MPS-only ({NUM_MPS_TASKS} task) ---")
-    torch.mps.empty_cache()
-    st = time.time()
-    mps_futs = [mps_matmul.remote(a_ref, b_ref) for _ in range(NUM_MPS_TASKS)]
-    mps_res = ray.get(mps_futs)
-    mps_wall = time.time() - st
-    print(f"Wall: {human(mps_wall)} s | Time: {human(mps_res[0]['time'])} s")
-
-    # --- Heterogeneous ---
-    print(f"\n--- Heterogeneous (CPU {NUM_CPU_TASKS} + MPS {NUM_MPS_TASKS}) ---")
-    torch.mps.empty_cache()
-    st = time.time()
-    futures = (
-        [cpu_matmul.remote(a_ref, b_ref) for _ in range(NUM_CPU_TASKS)] +
-        [mps_matmul.remote(a_ref, b_ref) for _ in range(NUM_MPS_TASKS)]
-    )
-    results = ray.get(futures)
+    futs   = []
+    labels = []
+    for i in range(NUM_BLOCKS):
+        if mps_available() and i % 2 == 0:          # even → GPU
+            futs.append(mps_block_matmul.remote(a_refs[i], b_ref))
+            labels.append("MPS")
+        else:                                        # odd  → CPU
+            futs.append(cpu_block_matmul.remote(a_refs[i], b_ref))
+            labels.append("CPU")
+    results = ray.get(futs)
     hetero_wall = time.time() - st
 
-    cpu_times = [r["time"] for r in results[:NUM_CPU_TASKS]]
-    mps_times = [r["time"] for r in results[NUM_CPU_TASKS:]]
-    print(f"Wall: {human(hetero_wall)} s")
-    for i, t in enumerate(cpu_times): print(f"  CPU {i}: {human(t)} s")
-    for i, t in enumerate(mps_times): print(f"  MPS {i}: {human(t)} s")
+    C_het = np.vstack([r[0] for r in results])
+    hetero_err = float(np.max(np.abs(C_het - C_ref)))
+    print(f"Wall : {human(hetero_wall)} s  |  Max err: {hetero_err:.2e}")
+    for i, (r, lbl) in enumerate(zip(results, labels)):
+        print(f"  Block {i:2d} ({lbl}): {human(r[1])} s")
 
-    # --- Summary ---
-    print("\n" + "="*55)
-    print(f"{'Mode':<15} {'Wall (s)':>10} {'Speedup vs CPU':>20}")
-    print("-"*55)
-    print(f"{'CPU-only':<15} {human(cpu_wall):>10} {'—':>20}")
-    print(f"{'MPS-only':<15} {human(mps_wall):>10} {human(cpu_wall/mps_wall):>20}x")
-    print(f"{'Heterogeneous':<15} {human(hetero_wall):>10} {human(cpu_wall/hetero_wall):>20}x")
-    print("="*55)
+    # ── Summary ────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print(f"{'Mode':<18} {'Wall (s)':>10} {'Speedup vs CPU':>20}")
+    print("-" * 60)
+    print(f"{'CPU-only':<18} {human(cpu_wall):>10} {'—':>20}")
+    if mps_wall != float('inf'):
+        print(f"{'MPS-only':<18} {human(mps_wall):>10} {human(cpu_wall / mps_wall):>19}x")
+    else:
+        print(f"{'MPS-only':<18} {'N/A':>10} {'N/A':>20}")
+    print(f"{'Heterogeneous':<18} {human(hetero_wall):>10} {human(cpu_wall / hetero_wall):>19}x")
+    print("=" * 60)
 
-    # --- Plot ---
+    # ── Plot ───────────────────────────────────────────────────────
     try:
         import matplotlib.pyplot as plt
-        plt.bar(['CPU-only', 'MPS-only', 'Hetero'], [cpu_wall, mps_wall, hetero_wall])
-        plt.ylabel('Wall Time (s)')
-        plt.title('M1 Air 8 GB – Heterogeneous MatMul')
-        plt.savefig('results/Task1/m1_Matrix_multiplication_benchmark.png', dpi=150, bbox_inches='tight')
-        plt.show()
-    except: pass
+        os.makedirs('results/Task1', exist_ok=True)
 
-    # --- Cleanup ---
-    print(f"Final: CPU {mem_snapshot()[0]}%, RSS {mem_snapshot()[1]:.1f} MB")
-    torch.mps.empty_cache()
+        modes  = ['CPU-only', 'MPS-only', 'Hetero']
+        times  = [cpu_wall, mps_wall if mps_wall != float('inf') else 0, hetero_wall]
+        colors = ['tab:blue', 'tab:orange', 'tab:green']
+
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        bars = ax.bar(modes, times, color=colors)
+        ax.set_ylabel('Wall Time (s)')
+        ax.set_title(f'M1 Air 8 GB – Tiled MatMul {N}×{N} ({NUM_BLOCKS} blocks)')
+        for bar in bars:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, h + max(times) * 0.02,
+                        f'{h:.2f}s', ha='center', fontsize=10)
+        plt.tight_layout()
+        plt.savefig('results/Task1/m1_Matrix_multiplication_benchmark.png',
+                    dpi=150, bbox_inches='tight')
+        plt.show()
+    except Exception as e:
+        print(f"Plot skipped: {e}")
+
+    # ── Cleanup ────────────────────────────────────────────────────
+    print(f"\nFinal: CPU {mem_snapshot()[0]}%, RSS {mem_snapshot()[1]:.1f} MB")
+    if mps_available():
+        torch.mps.empty_cache()
     gc.collect()
     ray.shutdown()
     print("Done.")

@@ -156,7 +156,7 @@ def create_tile_tasks(grid_w, grid_h, mode="hetero"):
 # ----------------------------------------------------------------------
 def assemble_image(tiles, tile_info, total_h, total_w):
     img = np.zeros((total_h, total_w), dtype=np.int32)
-    for (tile_data, _), (tile_y, tile_x, h, w) in zip(tiles, tile_info):
+    for (tile_data, _), (tile_y, tile_x, w, h) in zip(tiles, tile_info):
         y0 = tile_y * TILE_SIZE
         x0 = tile_x * TILE_SIZE
         img[y0:y0+h, x0:x0+w] = tile_data[:h, :w]
