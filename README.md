@@ -6,7 +6,7 @@
 
 [![Ray](https://img.shields.io/badge/Ray-2.51.0-blue?logo=ray&logoColor=white)](https://docs.ray.io/)
 [![Python](https://img.shields.io/badge/Python-3.11.9-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.10.0-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.11.0-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1-000000?logo=apple&logoColor=white)](https://support.apple.com/en-us/111902)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -229,25 +229,25 @@ Hetero   :  8 blocks → GPU (sequential)  }  run
 <summary><strong>📋 Sample output</strong></summary>
 
 ```
-Matrix size : 4096×4096 float32  (64.0 MB each)
+Matrix size : 4096×4096 float32  (67.1 MB each)
 Row-blocks  : 16 × (256×4096)
 CPU cores   : 8
 Total FLOPs : 137.4 GFLOP
 
 --- CPU-only (16 blocks across 8 CPU cores) ---
-Wall : 0.412 s  |  Avg block: 0.150 s
+Wall : 0.644 s  |  Avg block: 0.143 s
 
 --- MPS-only (16 blocks, sequential on GPU) ---
-Wall : 1.530 s  |  Avg block: 0.085 s
+Wall : 3.752 s  |  Avg block: 0.011 s
 
 --- Heterogeneous (CPU + MPS concurrent) ---
-Wall : 0.355 s
+Wall : 1.332 s
 ============================================================
-Mode               Wall (s)       Speedup vs CPU
+Mode                 Wall (s)       Speedup vs CPU
 ------------------------------------------------------------
-CPU-only              0.412                    —
-MPS-only              1.530               0.269x
-Heterogeneous         0.355               1.161x
+CPU-only                0.644                    —
+MPS-only                3.752               0.172x
+Heterogeneous           1.332               0.484x
 ============================================================
 ```
 </details>
@@ -300,9 +300,9 @@ Hetero   :  3 batches → GPU (even indices, sequential)  }  overlap
 ======================================================================
 Mode           π estimate   Wall (s)      Speedup
 ----------------------------------------------------------------------
-CPU-only         3.142064      0.438            —
-MPS-only         3.141465      1.154        0.38x
-Hetero           3.141169      0.126        3.48x
+CPU-only         3.142064      0.609            —
+MPS-only         3.141465      1.118        0.54x
+Hetero           3.141169      0.194        3.14x
 ======================================================================
 ```
 </details>
@@ -355,9 +355,9 @@ Hetero   :  8 tiles → MPS (even)  }  concurrent
 ======================================================================
 Mode           Wall (s)     Speedup vs CPU
 ----------------------------------------------------------------------
-CPU-only         11.429              1.00x
-MPS-only        107.394              0.11x
-Hetero           40.965              0.28x
+CPU-only         11.125              1.00x
+MPS-only        110.110              0.10x
+Hetero           40.329              0.28x
 ======================================================================
 ```
 </details>
@@ -374,9 +374,9 @@ Hetero           40.965              0.28x
 
 | Task | CPU-only | MPS-only | Hetero | Fastest |
 |:-----|:--------:|:--------:|:------:|:-------:|
-| **Matrix Multiplication** (4096²) | 0.412 s | 1.530 s | **0.355 s** ✅ | Hetero |
-| **Monte Carlo π** (30M points) | 0.438 s | 1.154 s | **0.126 s** ✅ | Hetero (3.5×) |
-| **Mandelbrot Set** (3000²) | **11.43 s** ✅ | 107.39 s | 40.97 s | CPU |
+| **Matrix Multiplication** (4096²) | **0.644 s** ✅ | 3.752 s | 1.332 s | CPU |
+| **Monte Carlo π** (30M points) | 0.609 s | 1.118 s | **0.194 s** ✅ | Hetero (3.1×) |
+| **Mandelbrot Set** (3000²) | **11.13 s** ✅ | 110.11 s | 40.33 s | CPU |
 
 > *Results from MacBook Air M1, 8 GB RAM, macOS 14. Your numbers will differ; run the scripts to see your results.*
 
@@ -409,7 +409,7 @@ On M1 specifically, **CPU and GPU share the same die and similar peak FLOP/s**. 
 
 ---
 
-### Task 1 — Matrix Multiplication: Why Hetero Wins
+### Task 1 — Matrix Multiplication: Why CPU Wins
 
 #### The Tiled Approach
 
@@ -432,9 +432,9 @@ MPS-only timeline (16 sequential blocks):
   ┌──────┬──────┬──────┬──────┬─ ─ ─ ─┬──────┐
   │ OVH  │ COMP │ OVH  │ COMP │       │ COMP │  × 16
   └──────┴──────┴──────┴──────┴─ ─ ─ ─┴──────┘
-  OVH = ~7 ms (copy, transfer, sync)
-  COMP = ~3 ms (actual matmul)
-  Total ≈ 16 × 10 ms = ~160 ms + Ray scheduling ≈ 1.5 s
+  OVH = ~220 ms (Ray scheduling + copy + transfer + sync)
+  COMP = ~11 ms (actual matmul)
+  Total ≈ 16 × 234 ms ≈ 3.75 s
 ```
 
 With `resources={"MPS": 1.0}`, Ray serializes **all 16 blocks** through a single GPU. The overhead per block (numpy copy, host-to-device transfer, synchronization, device-to-host result) **exceeds the raw compute time**. This is the classic "kernel launch overhead" trap.
@@ -446,12 +446,12 @@ CPU-only timeline (16 blocks, 8 cores):
   Wave 1:  [B0][B1][B2][B3][B4][B5][B6][B7]  ← 8 parallel
   Wave 2:  [B8][B9][B10][B11][B12][B13][B14][B15]
                                                 ↓
-  Total ≈ 2 waves × ~150 ms/wave ≈ 0.4 s
+  Total ≈ 2 waves × ~320 ms/wave ≈ 0.64 s
 ```
 
 Apple Accelerate routes `numpy.dot()` through the **AMX (Apple Matrix eXtensions) co-processor** — a dedicated hardware block inside each CPU core designed for matrix math. There's zero overhead: the data is already in RAM, no copies needed. With 8 cores running in parallel, 16 blocks complete in just 2 waves.
 
-#### Why Heterogeneous Wins
+#### Why Heterogeneous Loses
 
 ```
 Hetero timeline:
@@ -462,23 +462,21 @@ Hetero timeline:
   Wall time = max(CPU finish, GPU finish)
 ```
 
-The key insight: **CPU and GPU run simultaneously**. Even though GPU is slower per block (due to overhead), it's doing work that the CPU *doesn't have to do*. The CPU handles only 8 blocks instead of 16, cutting its workload in half → finishing in 1 wave instead of 2.
+Although individual GPU blocks are fast (~11 ms compute), Ray's per-task scheduling overhead for MPS blocks is substantial (~220 ms per block). With 8 sequential GPU blocks, the GPU chain takes ~1.3 s. Meanwhile, CPU blocks complete in ~0.6 s (1 wave of 8 blocks). The GPU chain becomes the **bottleneck**:
 
-**Hetero speedup formula:**
 ```
-CPU-only   :  ⌈16 / 8⌉ × T_cpu = 2 × T_cpu
-Hetero     :  max(⌈8 / 8⌉ × T_cpu, 8 × T_gpu)
-           =  max(1 × T_cpu, 8 × T_gpu)
+CPU-only   :  ⌈16 / 8⌉ × T_cpu_wave ≈ 0.64 s
+Hetero     :  max(1 × T_cpu_wave, 8 × T_gpu_scheduled)
+           =  max(~0.6 s, ~1.3 s) ≈ 1.33 s
 
-If GPU finishes its 8 blocks before CPU finishes 1 wave:
-  Hetero ≈ T_cpu → Speedup ≈ 2× over CPU-only
-
-In practice: ~1.1–1.3× speedup (GPU overhead limits the gain)
+Hetero is 2× SLOWER because GPU scheduling overhead dominates.
 ```
+
+**Lesson**: When Ray's per-task scheduling overhead exceeds the compute savings from offloading to GPU, heterogeneous mode hurts rather than helps. The CPU via Accelerate/AMX is so fast that the overhead of routing blocks through MPS makes the GPU a liability.
 
 ---
 
-### Task 2 — Monte Carlo π: Why Hetero Gets 3.5× Speedup
+### Task 2 — Monte Carlo π: Why Hetero Gets 3.1× Speedup
 
 #### Why This Workload Is Ideal for Heterogeneous
 
@@ -499,7 +497,7 @@ Monte Carlo π is the **perfect** embarrassingly parallel workload:
 | Operations per point | ~5 (rand, rand, mul, mul, add, compare) |
 | Total ops | ~150 M ops (lightweight) |
 
-#### Why MPS-Only Is Slow (0.38× = 2.6× slower than CPU)
+#### Why MPS-Only Is Slow (0.54× = 1.8× slower than CPU)
 
 ```
 MPS-only: 6 batches, all sequential on GPU (MPS resource = 1.0)
@@ -513,7 +511,7 @@ Total ≈ 6 × 180 ms ≈ 1.1 s
 
 Even though `torch.rand` on MPS generates random numbers **on the GPU** (no host transfer), the MPS resource constraint forces **6 sequential dispatches**. Each dispatch carries Ray scheduling overhead (~30 ms), Metal command buffer setup, and result serialization.
 
-#### Why CPU-Only Takes 0.44s
+#### Why CPU-Only Takes 0.61s
 
 ```
 CPU-only: 6 batches, 8 cores → all 6 fit in 1 wave
@@ -523,13 +521,13 @@ CPU-only: 6 batches, 8 cores → all 6 fit in 1 wave
   Core 2: [Batch 2]    Core 6: (idle)
   Core 3: [Batch 3]    Core 7: (idle)
 
-  Each batch: np.random + np.sum → ~400 ms (single-threaded NumPy)
-  But 6 batches run simultaneously → Wall ≈ 440 ms
+  Each batch: np.random + np.sum → ~600 ms (single-threaded NumPy)
+  But 6 batches run simultaneously → Wall ≈ 610 ms
 ```
 
-NumPy's random number generator is single-threaded per call, so each batch takes ~400 ms. All 6 run in parallel across 6 cores (out of 8), completing in roughly the time of a single batch.
+NumPy's random number generator is single-threaded per call, so each batch takes ~600 ms. All 6 run in parallel across 6 cores (out of 8), completing in roughly the time of a single batch.
 
-#### Why Hetero Achieves 3.5× Speedup (0.126s)
+#### Why Hetero Achieves 3.1× Speedup (0.194s)
 
 ```
 Hetero: 3 batches → GPU (even) + 3 batches → CPU (odd)
@@ -537,21 +535,21 @@ Hetero: 3 batches → GPU (even) + 3 batches → CPU (odd)
   CPU cores:  [Batch 1][Batch 3][Batch 5]     ← 3 batches, 1 wave
   GPU:        [Batch 0][Batch 2][Batch 4]     ← 3 sequential
 
-  ──────────────────────────────────────────→ time
-  0 ms       50 ms      100 ms     126 ms
+  ────────────────────────────────────────→ time
+  0 ms       50 ms      100 ms     194 ms
 ```
 
 This is the sweet spot:
 1. **CPU has fewer batches** (3 instead of 6) → each core finishes faster
 2. **GPU handles its 3 batches** concurrently with CPU → overlap
 3. **`torch.rand` on MPS is fast** for large batches — the GPU generates 5M random numbers more efficiently than NumPy
-4. Wall time = max(CPU share, GPU share) ≈ max(~120 ms, ~100 ms) ≈ 126 ms
+4. Wall time = max(CPU share, GPU share) ≈ max(~190 ms, ~150 ms) ≈ 194 ms
 
-**The 3.5× speedup comes from pure overlap**: CPU and GPU are doing useful work *at the same time* on different portions of the problem.
+**The 3.1× speedup comes from pure overlap**: CPU and GPU are doing useful work *at the same time* on different portions of the problem.
 
 ---
 
-### Task 3 — Mandelbrot: Why GPU Struggles (0.11× = 9× slower)
+### Task 3 — Mandelbrot: Why GPU Struggles (0.10× = 10× slower)
 
 #### The Fundamental Problem: Branch Divergence
 
@@ -606,8 +604,8 @@ This is called **warp/thread divergence** — the GPU's worst enemy. The more ir
 
 | Metric | CPU | MPS | Ratio |
 |--------|-----|-----|-------|
-| Wall time | 11.4 s | 107.4 s | **9.4× slower** |
-| Per-tile average | ~0.7 s | ~6.7 s | 9.5× |
+| Wall time | 11.1 s | 110.1 s | **9.9× slower** |
+| Per-tile average | ~0.7 s | ~6.9 s | 9.9× |
 | Useful compute | ~95% | ~10–20% (divergence) | — |
 | Overhead fraction | ~5% | ~80–90% | — |
 
@@ -616,13 +614,13 @@ This is called **warp/thread divergence** — the GPU's worst enemy. The more ir
 ```
 Hetero: 8 GPU tiles + 8 CPU tiles
 
-  CPU tiles:  8 tiles ÷ 8 cores = 1 wave ≈ ~5.7 s
-  GPU tiles:  8 tiles sequential  ≈ ~53 s     ← BOTTLENECK
+  CPU tiles:  8 tiles ÷ 8 cores = 1 wave ≈ ~5.6 s
+  GPU tiles:  8 tiles sequential  ≈ ~55 s     ← BOTTLENECK
 
-  Wall time = max(5.7 s, 53 s) = ~41 s
+  Wall time = max(5.6 s, 55 s) = ~40 s
 ```
 
-The GPU is so slow on this workload that its 8 tiles become the **bottleneck**. Even though the CPU finishes its 8 tiles in ~5.7 s, the overall wall time is dominated by the GPU's 53 s. Hetero is faster than MPS-only (41 s vs 107 s) because the CPU handled half the tiles, but it's still **3.6× slower than CPU-only**.
+The GPU is so slow on this workload that its 8 tiles become the **bottleneck**. Even though the CPU finishes its 8 tiles in ~5.6 s, the overall wall time is dominated by the GPU's 55 s. Hetero is faster than MPS-only (40 s vs 110 s) because the CPU handled half the tiles, but it's still **3.6× slower than CPU-only**.
 
 **Lesson**: Assigning work to a slower device makes the whole system wait for it.
 
@@ -636,8 +634,8 @@ The GPU is so slow on this workload that its 8 tiles become the **bottleneck**. 
  Regular, non-branching,        → Heterogeneous  GPU + CPU overlap; both
    large batches (Monte Carlo)                    contribute useful work
 
- Dense linear algebra           → Heterogeneous  CPU (Accelerate) is very fast,
-   (tiled matmul)                  or CPU-only    but GPU can absorb overflow blocks
+ Dense linear algebra           → CPU-only       CPU (Accelerate) is very fast;
+   (tiled matmul)                                 GPU scheduling overhead too high
 
  Iterative, branching,          → CPU-only       GPU wastes cycles on divergence;
    variable-length loops                          CPU branch predictor handles it well
@@ -657,7 +655,7 @@ Apple's Accelerate framework routes `numpy.dot()` through AMX — a dedicated ma
 The first MPS call compiles Metal shaders and initializes driver state. This one-time cost can add 500 ms–2 s. All benchmarks include a warm-up phase to exclude this from measurements.
 
 ### 3. Overhead Dominates Small/Medium Kernels
-For a 256×4096 matmul block (~8.6 GFLOP), the raw GPU compute takes ~3 ms but overhead (numpy copy, host→device, sync, device→host) adds ~7 ms. When overhead > compute, GPU loses.
+For a 256×4096 matmul block (~8.6 GFLOP), the raw GPU compute takes ~11 ms but overhead (Ray scheduling, numpy copy, host→device, sync, device→host) adds ~220 ms. When overhead >> compute, GPU loses.
 
 ### 4. Unified Memory ≠ Zero-Copy Transfers
 Despite M1's shared physical memory, PyTorch MPS still logically copies tensors between CPU and GPU address spaces. This is a PyTorch/Metal API limitation, not a hardware one.
@@ -669,7 +667,7 @@ The ideal workload for heterogeneous scheduling has:
 - **Independent tasks** (embarrassingly parallel)
 - **Enough tasks** to keep both CPU and GPU busy
 
-Monte Carlo π hits all four criteria → 3.5× speedup over CPU-only.
+Monte Carlo π hits all four criteria → 3.1× speedup over CPU-only.
 
 ---
 
