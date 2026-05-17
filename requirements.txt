@@ -68,9 +68,9 @@ setuptools==65.5.0
 six==1.17.0
 smart_open==7.4.2
 sympy==1.14.0
-torch==2.12.0
-torchaudio==2.12.0
-torchvision==0.27.0
+torch==2.11.0
+torchaudio==2.11.0
+torchvision==0.26.0
 typing_extensions==4.15.0
 typing-inspection==0.4.2
 tzdata==2025.2
