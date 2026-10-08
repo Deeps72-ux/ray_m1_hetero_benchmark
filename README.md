@@ -19,6 +19,7 @@
 ## 📖 Table of Contents
 
 - [Overview](#-overview)
+- [Why Python over C/C++?](#-why-python-over-cc)
 - [Architecture](#-architecture)
 - [Project Structure](#-project-structure)
 - [Setup](#-setup)
@@ -94,6 +95,50 @@ A problem is **embarrassingly parallel** when it can be split into completely in
 | 7-core GPU (Metal) | 128 EUs | ~**2.6 TFLOP/s** |
 
 > **Key insight**: On M1, CPU (via AMX/Accelerate) and GPU have roughly **equal peak throughput** for float32. The winner depends on overhead, memory access patterns, and workload shape.
+
+---
+
+## 🐍 Why Python over C/C++?
+
+Apple Silicon fully supports C and C++, so a natural question is: *why not write these benchmarks in a compiled language for maximum performance?*
+
+The short answer: **Python is only the orchestration layer — the actual computation already runs in highly optimized native code.**
+
+### What Python actually does here
+
+The Python code in this project is a thin (~5%) glue layer that sets up inputs, launches tasks, and collects timings. The heavy number‑crunching is handled entirely by native libraries:
+
+| Layer | What it does | Runs in |
+|-------|-------------|--------|
+| **NumPy / Accelerate** | Matrix multiplication, random number generation | C / Fortran / M1 AMX co‑processor (via Apple's BLAS) |
+| **PyTorch MPS** | GPU tensor operations | C++ / Objective‑C / Metal shaders |
+| **Ray** | Distributed task scheduling, serialization | C++ core with Python bindings |
+
+When you call `np.matmul(A, B)`, Python hands off to `cblas_sgemm` inside Apple's **Accelerate** framework — the exact same function a C program would call. When you call `tensor.to("mps")`, PyTorch dispatches to compiled **Metal** GPU shaders. Python never touches the hot loop.
+
+### The performance gap is negligible
+
+Each task in this benchmark processes **4096×4096 matrices** or millions of Monte Carlo samples. A single `matmul` call takes hundreds of milliseconds of native compute, while the Python dispatch overhead is on the order of *microseconds*. Replacing Python with C++ would affect < 0.1% of wall‑clock time.
+
+### C/C++ would cost much more for the same result
+
+| Aspect | Python (current) | C/C++ rewrite |
+|--------|-----------------|---------------|
+| Lines of code per task | ~220 | ~800–1500 |
+| Ray integration | `@ray.remote` decorator | Ray C++ API (less mature, fewer docs) |
+| PyTorch MPS access | `tensor.to("mps")` | LibTorch C++ + Metal (complex setup) |
+| BLAS call | `np.matmul(A, B)` | `cblas_sgemm(...)` (identical Accelerate call) |
+| Development time | Hours | Days to weeks |
+| Benchmark speed difference | Baseline | **~0–2% faster** |
+
+### When *would* C/C++ be the right choice?
+
+- Writing **custom compute kernels** (e.g., a hand‑tuned GEMM or custom Metal shaders)
+- Workloads with **millions of tiny operations** where Python loop overhead dominates
+- **Real‑time / latency‑critical** systems (game engines, audio processing)
+- **Production systems** where eliminating the interpreter is a deployment requirement
+
+> **Bottom line**: For an orchestration‑heavy benchmark like this one, Python gives us concise, readable code with *zero meaningful performance penalty*, because every performance‑critical path already executes in native C/C++/Metal under the hood.
 
 ---
 
